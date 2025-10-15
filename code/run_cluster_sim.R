@@ -1,3 +1,7 @@
+# update Feb 2024: 
+# 1) update the truth file
+# 2) add the causal forest without super learner
+
 #!/usr/bin/env Rscript
 args = commandArgs(trailingOnly=TRUE)
 
@@ -30,7 +34,7 @@ random_seeds <- seed_data$random_seeds
 
 # read in the truth file
 truth_data <- read_csv(
-  here("data", "truth_data_simulation_all.csv")
+  here("data", "truth_data_simulation_all_update.csv")
 )
 
 # use c_number to extract the parameters needed from the truth data
@@ -98,12 +102,13 @@ results <- foreach(i = 1:nrow(truth_data), .packages = func.packages) %dopar% {
 parallel::stopCluster(cl = my.cluster)
 
 # extract the blp output and result table to separate files
-result_all <- blp_cf_all <- blp_drl_all <- NULL
+result_all <- blp_cf_all <- blp_cf_sl_all <- blp_drl_all <- NULL
 for (i in seq(nrow(truth_data))) {
   for (j in seq(number_sims)) {
     result_all <- rbind(result_all, results[[i]][[j]][[1]])
     blp_cf_all <- rbind(blp_cf_all, results[[i]][[j]][[2]])
-    blp_drl_all <-rbind(blp_drl_all, results[[i]][[j]][[3]])
+    blp_cf_sl_all <- rbind(blp_cf_sl_all, results[[i]][[j]][[3]])
+    blp_drl_all <- rbind(blp_drl_all, results[[i]][[j]][[4]])
   }
 }
 
@@ -153,5 +158,6 @@ write_csv(summary_truth, here("output", paste0("Summary_truth_c", c_number, "_n"
 write_csv(summary_oracle, here("output", paste0("Summary_oracle_c", c_number, "_n", sample_size, "_sims", number_sims, "_", Sys.Date(), ".csv")))
 ## blp results
 write_csv(blp_cf_all, here("output", paste0("Blp_cf_c", c_number, "_n", sample_size, "_sims", number_sims, "_", Sys.Date(), ".csv")))
+write_csv(blp_cf_sl_all, here("output", paste0("Blp_cf_sl_c", c_number, "_n", sample_size, "_sims", number_sims, "_", Sys.Date(), ".csv")))
 write_csv(blp_drl_all, here("output", paste0("Blp_drl_c", c_number, "_n", sample_size, "_sims", number_sims, "_", Sys.Date(), ".csv")))
 

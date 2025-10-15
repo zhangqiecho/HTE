@@ -3,6 +3,9 @@
 # including data generation and analysis
 ## update in Jan 2024: 
 # 1) round down the continuous confounders
+## update in Feb 2024:
+# 1) update the calculation of oracle truth
+# 2) add the causal forest without super learner
 
 # CREATE EXPIT AND LOGIT FUNCTIONS
 expit <- function(x){ exp(x)/(1+exp(x)) }
@@ -74,15 +77,15 @@ cluster_sim <- function(seed_value, number_sims, sample_size, c_number, param1, 
   # oracle truth in the data generating mechanism
   rd_m0 <- mean(mu10 - mu00)
   rd_m1 <- mean(mu11 - mu01)
-  rd_ate <- mean(rd_m0*(1-pi_) + rd_m1*pi_)
+  # rd_ate <- mean(rd_m0*(1-pi_) + rd_m1*pi_)
   
-  # mu1 <-  expit(balancing_intercept +
-  #                 log(param1)*1 + log(2)*m -
-  #                 log(param2)*1*m + dMat[,-1]%*%beta)
-  # mu0 <-  expit(balancing_intercept +
-  #                 log(param1)*0 + log(2)*m -
-  #                 log(param2)*0*m + dMat[,-1]%*%beta)
-  # rd_ate <- mean(mu1-mu0)
+  mu1 <-  expit(balancing_intercept +
+                  log(param1)*1 + log(2)*pi_ -
+                  log(param2)*1*pi_ + dMat[,-1]%*%beta)
+  mu0 <-  expit(balancing_intercept +
+                  log(param1)*0 + log(2)*pi_ -
+                  log(param2)*0*pi_ + dMat[,-1]%*%beta)
+  rd_ate <- mean(mu1-mu0) # udpated calculation of oracle ATE
   
   
   
@@ -221,7 +224,26 @@ cluster_sim <- function(seed_value, number_sims, sample_size, c_number, param1, 
   
   ## HERE WE HAVE CAUSAL FOREST CODE TO IDENTIFY APPROPORATE MODIFERS
   # we construct a causal forest using the `causal_forest` function from the grf package:
+  # causal forest without using prediction from super learner
   forest <- causal_forest(X = covariates_matrix, 
+                             Y = outcome, 
+                             W = exposure, 
+                             num.trees = 2000,
+                             honesty = TRUE,
+                             #min.node.size = 10, # might need increase this, tunable
+                             #alpha = .05, #  tunable
+                             #imbalance.penalty = 0, #  tunable
+                             stabilize.splits = TRUE,
+                             tune.parameters = "all", # might need change this
+                             tune.num.trees = 200,
+                             tune.num.reps = 50,
+                             tune.num.draws = 1000,
+                             compute.oob.predictions = TRUE,
+                             num.threads = 10,
+                             seed = 123,
+                             clusters = folds) # https://bit.ly/42aBuPP
+  # causal forest using prediction from super learner
+  forest_sl <- causal_forest(X = covariates_matrix, 
                           Y = outcome, 
                           W = exposure, 
                           Y.hat = mu_hat, # use super learner for w hat and Y hat
@@ -242,12 +264,24 @@ cluster_sim <- function(seed_value, number_sims, sample_size, c_number, param1, 
                           clusters = folds) # https://bit.ly/42aBuPP
   
   #tau.hat = predict(forest)$predictions
-  
+  # start modifying algorithms form here by adding another cf..............
   ## COMPUTE THE ATE FROM THE CAUSAL FOREST ALGORITHM
   # we then use the `average_treatment_effect()` function to obtain an ATE estimate
   cf_ate <- average_treatment_effect(forest)
+  cf_sl_ate <- average_treatment_effect(forest_sl)
   
   blp_cf <- tidy(best_linear_projection(forest, covariates_matrix)) %>% 
+    filter(term != "(Intercept)") %>% 
+    arrange(desc(abs(statistic))) %>% 
+    mutate(parameter1 = param1,
+           parameter2 = param2,
+           sample_size = n,
+           confounder_number = c_number,
+           seed_number = seed_value,
+           method = "BLP_causal_forest",
+           group = group)
+  
+  blp_cf_sl <- tidy(best_linear_projection(forest_sl, covariates_matrix)) %>% 
     filter(term != "(Intercept)") %>% 
     arrange(desc(abs(statistic))) %>% 
     mutate(parameter1 = param1,
@@ -265,30 +299,45 @@ cluster_sim <- function(seed_value, number_sims, sample_size, c_number, param1, 
   # } else {
   #   m_cf = 0
   # }
-  
   aipw_scores <- get_scores(forest,
                             subset = NULL,
                             debiasing.weights = NULL,
                             num.trees.for.weights = 2000
   )
   
-  fmla <- as.formula(aipw_scores ~ factor(m)) # Q: why not use tau.hat?
-  score_reg <- lm(fmla, 
-                  data=transform(dat, aipw_scores=aipw_scores))
+  aipw_scores_sl <- get_scores(forest_sl,
+                            subset = NULL,
+                            debiasing.weights = NULL,
+                            num.trees.for.weights = 2000
+  )
   
-  c_matrix1 <- c(1, 0)
-  c_matrix2 <- c(1, 1)
+  # function to estimate cate based on aipw_scores
+  cate_predict <- function(aipw_scores){
+    fmla <- as.formula(aipw_scores ~ factor(m)) # Q: why not use tau.hat?
+    score_reg <- lm(fmla, 
+                    data=transform(dat, aipw_scores=aipw_scores))
+    
+    c_matrix1 <- c(1, 0)
+    c_matrix2 <- c(1, 1)
+    
+    cate_m0 <- data.frame(t(c(coef(score_reg) %*% c_matrix1, 
+                              sqrt(t(c_matrix1) %*% vcovHC(score_reg, type = "HC3") %*% c_matrix1))
+    ))
+    names(cate_m0) <- c("estimate", "std.err")
+    
+    cate_m1 <- data.frame(t(c(coef(score_reg) %*% c_matrix2, 
+                              sqrt(t(c_matrix2) %*% vcovHC(score_reg, type = "HC3") %*% c_matrix2))
+    ))
+    names(cate_m1) <- c("estimate", "std.err")
+    return(list(cate_m0, cate_m1))
+  }
   
-  cf_cate_m0 <- data.frame(t(c(coef(score_reg) %*% c_matrix1, 
-                               sqrt(t(c_matrix1) %*% vcovHC(score_reg, type = "HC3") %*% c_matrix1))
-  ))
-  names(cf_cate_m0) <- c("estimate", "std.err")
-  
-  cf_cate_m1 <- data.frame(t(c(coef(score_reg) %*% c_matrix2, 
-                               sqrt(t(c_matrix2) %*% vcovHC(score_reg, type = "HC3") %*% c_matrix2))
-  ))
-  names(cf_cate_m1) <- c("estimate", "std.err")
-  
+  cf_cate <- cate_predict(aipw_scores = aipw_scores)
+  cf_cate_m0 <- cf_cate[[1]]
+  cf_cate_m1 <- cf_cate[[2]]
+  cf_sl_cate <- cate_predict(aipw_scores = aipw_scores_sl)
+  cf_sl_cate_m0 <- cf_sl_cate[[1]]
+  cf_sl_cate_m1 <- cf_sl_cate[[2]]
   # DO THE EXACT SAME FOR DRLEARNER.
   
   mu_hat1 <- NULL
@@ -354,22 +403,26 @@ cluster_sim <- function(seed_value, number_sims, sample_size, c_number, param1, 
   #   m_drl = 0
   # }
   
-  fmla <- as.formula(aipw_score ~ factor(m))
-  score_reg <- lm(fmla, 
-                  data=transform(dat, aipw_scores=aipw_score))
+  drl_cate <- cate_predict(aipw_scores = aipw_score)
+  drl_cate_m0 <- drl_cate[[1]]
+  drl_cate_m1 <- drl_cate[[2]]
   
-  c_matrix1 <- c(1, 0)
-  c_matrix2 <- c(1, 1)
-  
-  drl_cate_m0 <- data.frame(t(c(coef(score_reg) %*% c_matrix1, 
-                                sqrt(t(c_matrix1) %*% vcovHC(score_reg, type = "HC3") %*% c_matrix1))
-  ))
-  names(drl_cate_m0) <- c("estimate", "std.err")
-  
-  drl_cate_m1 <- data.frame(t(c(coef(score_reg) %*% c_matrix2, 
-                                sqrt(t(c_matrix2) %*% vcovHC(score_reg, type = "HC3") %*% c_matrix2))
-  ))
-  names(drl_cate_m1) <- c("estimate", "std.err")
+  # fmla <- as.formula(aipw_score ~ factor(m))
+  # score_reg <- lm(fmla, 
+  #                 data=transform(dat, aipw_scores=aipw_score))
+  # 
+  # c_matrix1 <- c(1, 0)
+  # c_matrix2 <- c(1, 1)
+  # 
+  # drl_cate_m0 <- data.frame(t(c(coef(score_reg) %*% c_matrix1, 
+  #                               sqrt(t(c_matrix1) %*% vcovHC(score_reg, type = "HC3") %*% c_matrix1))
+  # ))
+  # names(drl_cate_m0) <- c("estimate", "std.err")
+  # 
+  # drl_cate_m1 <- data.frame(t(c(coef(score_reg) %*% c_matrix2, 
+  #                               sqrt(t(c_matrix2) %*% vcovHC(score_reg, type = "HC3") %*% c_matrix2))
+  # ))
+  # names(drl_cate_m1) <- c("estimate", "std.err")
   
   # objects to save:
   result <- rbind(
@@ -382,6 +435,9 @@ cluster_sim <- function(seed_value, number_sims, sample_size, c_number, param1, 
     data.frame(estimator = "causal_forest_ate",     t(cf_ate)),
     data.frame(estimator = "causal_forest_cate_m0", cf_cate_m0),
     data.frame(estimator = "causal_forest_cate_m1", cf_cate_m1),
+    data.frame(estimator = "causal_forest_SL_ate",     t(cf_sl_ate)),
+    data.frame(estimator = "causal_forest_SL_cate_m0", cf_sl_cate_m0),
+    data.frame(estimator = "causal_forest_SL_cate_m1", cf_sl_cate_m1),
     data.frame(estimator = "DRLearner_ate",         aipw_ate),
     data.frame(estimator = "DRLearner_cate_m0",     drl_cate_m0),
     data.frame(estimator = "DRLearner_cate_m1",     drl_cate_m1)
@@ -390,8 +446,10 @@ cluster_sim <- function(seed_value, number_sims, sample_size, c_number, param1, 
     select(group, estimator, seed_number, sample_size, confounder_number, or_exposure, or_interaction, p_exposure, estimate, std.err)
   ## writing files for each group of parameters:
   write_csv(blp_cf, here("output",paste0("Blp_cf_c", c_number, "_n", n, "_sims", number_sims, ".csv")), append = T)
+  write_csv(blp_cf_sl, here("output",paste0("Blp_cf_sl_c", c_number, "_n", n, "_sims", number_sims, ".csv")), append = T)
   write_csv(blp_drl, here("output",paste0("Blp_drl_c", c_number, "_n", n, "_sims", number_sims, ".csv")), append = T)
   write_csv(result, here("output",paste0("All_results_c", c_number, "_n", n, "_sims", number_sims, ".csv")), append = T)
-  return(list(result, blp_cf, blp_drl))
+  return(list(result, blp_cf, blp_cf_sl, blp_drl))
   
 }   
+
