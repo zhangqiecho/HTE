@@ -71,7 +71,16 @@ data_sim <- function(sample_size, c_number, param1, param2, exposure, referent, 
     
     rd_m0 <- mean(mu10 - mu00)
     rd_m1 <- mean(mu11 - mu01)
-    rd <- mean(rd_m0*(1-pi_) + rd_m1*pi_)
+    #rd <- mean(rd_m0*(1-pi_) + rd_m1*pi_)
+    # update:
+    mu1 <-  expit(balancing_intercept +
+                    log(param1)*1 + log(2)*pi_ -
+                    log(param2)*1*pi_ + dMat[,-1]%*%beta)
+    mu0 <-  expit(balancing_intercept +
+                    log(param1)*0 + log(2)*pi_ -
+                    log(param2)*0*pi_ + dMat[,-1]%*%beta)
+    rd <- mean(mu1-mu0)
+    
     
     res <- data.frame(
       sample_size = sample_size,
@@ -171,7 +180,7 @@ table <- lapply(1:nrow(data_grid),
 
 
 truth <- do.call(rbind, table)
-write_csv(truth, "H:/RA/HTE/Data/truth_data_simulation.csv")
+#write_csv(truth, "H:/RA/HTE/Data/truth_data_simulation.csv")
 
 ## c_number= 10
 param_dat1 <- list(param1 = 1.291,
@@ -235,7 +244,7 @@ table3 <- lapply(1:nrow(data_grid),
 truth3 <- do.call(rbind, table3)
 
 truth_all <- rbind(truth, truth2, truth3)
-write_csv(truth_all, "H:/RA/HTE/Data/truth_data_simulation_all.csv")
+write_csv(truth_all, "H:/RA/HTE/Data/truth_data_simulation_all_update.csv")
 
 # Sigma = matrix(c(1,0.5,0.5,1), ncol=2)
 # R = chol(Sigma) # Sigma == t(R)%*%  R
