@@ -16,4 +16,7 @@ Run `code/run_cluster_sim.R` to intiate the data simulation, estimating CATE usi
 * Finite sample property: `code/figure.R`
 * Comparison of performance of causal forest with vs. without the Super Learner: `code/figure_cf.R`
 
+### Note
+Please ensure that file paths are updated appropriately before running the scripts
+
 
